@@ -1,0 +1,20 @@
+name = "friday"
+
+[models]
+chat = "gpt-oss:20b"
+embeddings = "nomic-embed-text"
+
+[content]
+paths = ["."]
+extensions = [".md"]
+ignore = []
+max_chunk_tokens = 800
+min_chunk_tokens = 50
+include_frontmatter = true
+
+[retrieval]
+top_k = 6
+similarity_threshold = 0.0
+
+[ollama]
+host = "http://localhost:11434"
