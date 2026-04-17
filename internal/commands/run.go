@@ -40,6 +40,13 @@ func newRunCommand() *cobra.Command {
 				return err
 			}
 			defer db.Close()
+			if dim, ok, err := db.EmbeddingDim(ctx); err != nil {
+				return err
+			} else if ok {
+				if err := db.EnsureVectorTable(ctx, dim); err != nil {
+					return err
+				}
+			}
 
 			if model == "" {
 				model = cfg.Config.Models.Chat

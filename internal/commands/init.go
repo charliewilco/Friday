@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -100,6 +101,9 @@ func newInitCommand() *cobra.Command {
 				return err
 			}
 			defer db.Close()
+			if err := db.InitializeProject(ctx, loaded.Config.Name, time.Now()); err != nil {
+				return err
+			}
 
 			fmt.Fprintf(cmd.OutOrStdout(), "created %s\n", configPath)
 			fmt.Fprintln(cmd.OutOrStdout(), "Run 'friday embed' to index your corpus.")
@@ -175,17 +179,29 @@ func detectContentPaths(root string) ([]string, error) {
 
 func promptInitConfig(cmd *cobra.Command, cfg *config.Config) error {
 	reader := bufio.NewReader(cmd.InOrStdin())
+	fmt.Fprintf(cmd.OutOrStdout(), "Project name [%s]: ", cfg.Name)
+	line, err := reader.ReadString('\n')
+	if err != nil {
+		return err
+	}
+	line = strings.TrimSpace(line)
+	if line != "" {
+		cfg.Name = line
+	}
+
+	if err := promptContentPaths(cmd, reader, cfg); err != nil {
+		return err
+	}
+
 	questions := []struct {
 		label string
 		value *string
 	}{
-		{label: fmt.Sprintf("Project name [%s]: ", cfg.Name), value: &cfg.Name},
-		{label: fmt.Sprintf("Content paths (comma-separated) [%s]: ", strings.Join(cfg.Content.Paths, ", ")), value: nil},
 		{label: fmt.Sprintf("Chat model [%s]: ", cfg.Models.Chat), value: &cfg.Models.Chat},
 		{label: fmt.Sprintf("Embedding model [%s]: ", cfg.Models.Embeddings), value: &cfg.Models.Embeddings},
 	}
 
-	for idx, question := range questions {
+	for _, question := range questions {
 		fmt.Fprint(cmd.OutOrStdout(), question.label)
 		line, err := reader.ReadString('\n')
 		if err != nil {
@@ -195,14 +211,38 @@ func promptInitConfig(cmd *cobra.Command, cfg *config.Config) error {
 		if line == "" {
 			continue
 		}
-
-		if idx == 1 {
-			cfg.Content.Paths = splitCSV(line)
-			continue
-		}
 		*question.value = line
 	}
 	cfg.Name = kebabCase(cfg.Name)
+	return nil
+}
+
+func promptContentPaths(cmd *cobra.Command, reader *bufio.Reader, cfg *config.Config) error {
+	if len(cfg.Content.Paths) > 0 {
+		fmt.Fprintln(cmd.OutOrStdout(), "Detected content paths:")
+		for _, path := range cfg.Content.Paths {
+			fmt.Fprintf(cmd.OutOrStdout(), "  - %s\n", path)
+		}
+		fmt.Fprintf(cmd.OutOrStdout(), "Use detected content paths? [Y/n]: ")
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			return err
+		}
+		switch strings.ToLower(strings.TrimSpace(line)) {
+		case "", "y", "yes":
+			return nil
+		}
+	}
+
+	fmt.Fprintf(cmd.OutOrStdout(), "Content paths (comma-separated) [%s]: ", strings.Join(cfg.Content.Paths, ", "))
+	line, err := reader.ReadString('\n')
+	if err != nil {
+		return err
+	}
+	line = strings.TrimSpace(line)
+	if line != "" {
+		cfg.Content.Paths = splitCSV(line)
+	}
 	return nil
 }
 

@@ -2,7 +2,6 @@ package commands
 
 import (
 	"fmt"
-	"os"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -46,7 +45,7 @@ func newEmbedCommand() *cobra.Command {
 				Force:   force,
 				DryRun:  dryRun,
 				Verbose: verbose,
-				Stderr:  os.Stderr,
+				Stderr:  cmd.ErrOrStderr(),
 			})
 			if err != nil {
 				if strings.Contains(err.Error(), "embedding dimension mismatch") {

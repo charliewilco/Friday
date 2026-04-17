@@ -1,5 +1,9 @@
 package store
 
+import "fmt"
+
+const SchemaVersion = "2"
+
 const schemaSQL = `
 PRAGMA foreign_keys = ON;
 
@@ -29,9 +33,12 @@ CREATE TABLE IF NOT EXISTS chunks (
 );
 
 CREATE INDEX IF NOT EXISTS chunks_file_idx ON chunks(file_id);
-
-CREATE TABLE IF NOT EXISTS chunk_vectors (
-	chunk_id INTEGER PRIMARY KEY REFERENCES chunks(id) ON DELETE CASCADE,
-	embedding_json TEXT NOT NULL
-);
 `
+
+func vectorTableSQL(dim int) string {
+	return fmt.Sprintf(`
+CREATE VIRTUAL TABLE IF NOT EXISTS chunk_vectors USING vec0(
+	chunk_id INTEGER PRIMARY KEY,
+	embedding FLOAT[%d] distance_metric=cosine
+);`, dim)
+}

@@ -104,4 +104,25 @@ func TestCLIInitEmbedAsk(t *testing.T) {
 	if !strings.Contains(askOutput, "Sources:") {
 		t.Fatalf("expected citations in ask output: %s", askOutput)
 	}
+	if !strings.Contains(askOutput, "content/post.md") {
+		t.Fatalf("expected specific citation path in ask output: %s", askOutput)
+	}
+
+	cmd := commands.NewRootCommand()
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stdout)
+	cmd.SetIn(strings.NewReader(":stats\n:sources swift\n:q\n"))
+	cmd.SetArgs([]string{"run"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("run command failed: %v\n%s", err, stdout.String())
+	}
+
+	runOutput := stdout.String()
+	if !strings.Contains(runOutput, "Friday ready.") {
+		t.Fatalf("expected run welcome output: %s", runOutput)
+	}
+	if !strings.Contains(runOutput, "content/post.md") {
+		t.Fatalf("expected sources output from run command: %s", runOutput)
+	}
 }

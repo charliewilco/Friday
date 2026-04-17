@@ -4,11 +4,19 @@ Friday is a local-first Go CLI for chatting with a personal markdown corpus thro
 
 ## Install
 
-Friday currently uses `github.com/mattn/go-sqlite3`, so building requires cgo and a working C toolchain.
+Friday uses `github.com/mattn/go-sqlite3` together with the official [`sqlite-vec` Go CGO bindings](https://alexgarcia.xyz/sqlite-vec/go.html), so building requires:
+
+- Go 1.22+
+- cgo enabled
+- a working C toolchain
+
+`sqlite-vec` is compiled and linked into the binary during the build, so you do not need to install a separate `.dylib`/`.so` at runtime. The first build is slower because the vector extension is compiled from source.
 
 ```bash
 go install github.com/charliewilco/friday/cmd/friday@latest
 ```
+
+If Friday starts but fails while opening the database with a `sqlite-vec` initialization error, rebuild with cgo enabled and confirm your local toolchain can compile CGO dependencies.
 
 ## Quickstart
 
@@ -21,6 +29,8 @@ friday init
 friday embed
 friday run
 ```
+
+`friday embed` prints one line per file as it indexes, skips unchanged files on repeat runs, and removes entries for files that no longer exist.
 
 One-shot usage:
 
@@ -57,3 +67,9 @@ host = "http://localhost:11434"
 ```
 
 `FRIDAY_OLLAMA_HOST` overrides `ollama.host`.
+
+## Notes
+
+- Friday stores derived state in `~/.friday/<project-name>/friday.db`.
+- Changing to an embedding model with a different output dimension requires `friday reset` before re-embedding.
+- `friday run` supports `:help`, `:stats`, `:sources <query>`, `:k <n>`, and `:q`.

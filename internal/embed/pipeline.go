@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"time"
@@ -28,11 +29,19 @@ type Options struct {
 	Force   bool
 	DryRun  bool
 	Verbose bool
-	Stderr  *os.File
+	Stderr  io.Writer
 }
 
 func Run(ctx context.Context, cfg config.Loaded, db *store.Store, client *ollama.Client, opts Options) (Result, error) {
 	start := time.Now()
+	progressOut := opts.Stderr
+	if progressOut == nil {
+		progressOut = io.Discard
+	}
+	if err := db.InitializeProject(ctx, cfg.Config.Name, start); err != nil {
+		return Result{}, err
+	}
+
 	files, err := corpus.WalkMarkdownFiles(cfg)
 	if err != nil {
 		return Result{}, err
@@ -52,6 +61,11 @@ func Run(ctx context.Context, cfg config.Loaded, db *store.Store, client *ollama
 	}
 	if !ok && !opts.DryRun {
 		if err := db.SetEmbeddingDim(ctx, dim); err != nil {
+			return Result{}, err
+		}
+	}
+	if !opts.DryRun {
+		if err := db.EnsureVectorTable(ctx, dim); err != nil {
 			return Result{}, err
 		}
 	}
@@ -75,9 +89,7 @@ func Run(ctx context.Context, cfg config.Loaded, db *store.Store, client *ollama
 		}
 		if found && record.SHA256 == hash && !opts.Force {
 			result.UnchangedFiles++
-			if opts.Verbose {
-				fmt.Fprintf(opts.Stderr, "unchanged: %s\n", relPath)
-			}
+			fmt.Fprintf(progressOut, "unchanged: %s\n", relPath)
 			continue
 		}
 
@@ -88,9 +100,7 @@ func Run(ctx context.Context, cfg config.Loaded, db *store.Store, client *ollama
 
 		if opts.DryRun {
 			result.IndexedFiles++
-			if opts.Verbose || !found || record.SHA256 != hash {
-				fmt.Fprintf(opts.Stderr, "indexed: %s (%d chunks)\n", relPath, len(chunks))
-			}
+			fmt.Fprintf(progressOut, "indexed: %s (%d chunks)\n", relPath, len(chunks))
 			continue
 		}
 
@@ -126,7 +136,7 @@ func Run(ctx context.Context, cfg config.Loaded, db *store.Store, client *ollama
 		}
 
 		result.IndexedFiles++
-		fmt.Fprintf(opts.Stderr, "indexed: %s (%d chunks)\n", relPath, len(chunks))
+		fmt.Fprintf(progressOut, "indexed: %s (%d chunks)\n", relPath, len(chunks))
 	}
 
 	removed, err := db.DeleteMissingFiles(ctx, keepPaths)
@@ -135,7 +145,7 @@ func Run(ctx context.Context, cfg config.Loaded, db *store.Store, client *ollama
 	}
 	result.RemovedFiles = len(removed)
 	for _, path := range removed {
-		fmt.Fprintf(opts.Stderr, "removed: %s\n", path)
+		fmt.Fprintf(progressOut, "removed: %s\n", path)
 	}
 
 	if !opts.DryRun {

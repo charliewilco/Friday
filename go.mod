@@ -1,9 +1,10 @@
 module github.com/charliewilco/friday
 
-go 1.22.0
+go 1.22.5
 
 require (
 	github.com/BurntSushi/toml v1.5.0
+	github.com/asg017/sqlite-vec-go-bindings v0.1.6
 	github.com/charmbracelet/lipgloss v1.1.0
 	github.com/mattn/go-sqlite3 v1.14.28
 	github.com/spf13/cobra v1.9.1

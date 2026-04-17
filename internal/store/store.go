@@ -1,20 +1,27 @@
 package store
 
+/*
+#include <stdlib.h>
+*/
+import "C"
+
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"math"
 	"os"
 	"path/filepath"
-	"sort"
 	"strconv"
+	"strings"
+	"sync"
 	"time"
 
+	sqlite_vec "github.com/asg017/sqlite-vec-go-bindings/cgo"
 	_ "github.com/mattn/go-sqlite3"
 )
+
+var sqliteVecOnce sync.Once
 
 type Store struct {
 	db *sql.DB
@@ -39,21 +46,22 @@ type ChunkRecord struct {
 }
 
 type SearchResult struct {
-	ChunkID      int64
-	Path         string
-	Title        string
-	HeadingPath  string
-	Content      string
-	Distance     float64
-	Similarity   float64
-	ChunkIndex   int
-	EmbeddingLen int
+	ChunkID     int64
+	Path        string
+	Title       string
+	HeadingPath string
+	Content     string
+	Distance    float64
+	Similarity  float64
+	ChunkIndex  int
 }
 
 func Open(path string) (*Store, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, fmt.Errorf("failed to create state directory: %w", err)
 	}
+
+	enableSQLiteVec()
 
 	db, err := sql.Open("sqlite3", path)
 	if err != nil {
@@ -62,12 +70,31 @@ func Open(path string) (*Store, error) {
 
 	db.SetMaxOpenConns(1)
 
+	store := &Store{db: db}
+	if err := store.validateVectorSupport(); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 	if _, err := db.Exec(schemaSQL); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("failed to apply schema: %w", err)
 	}
 
-	return &Store{db: db}, nil
+	return store, nil
+}
+
+func enableSQLiteVec() {
+	sqliteVecOnce.Do(func() {
+		sqlite_vec.Auto()
+	})
+}
+
+func (s *Store) validateVectorSupport() error {
+	var version string
+	if err := s.db.QueryRow(`SELECT vec_version()`).Scan(&version); err != nil {
+		return fmt.Errorf("failed to initialize sqlite-vec support: %w. Rebuild Friday with CGO enabled so sqlite-vec can be linked into the binary", err)
+	}
+	return nil
 }
 
 func (s *Store) Close() error {
@@ -87,8 +114,23 @@ func (s *Store) EnsureExists(path string) error {
 	return nil
 }
 
+func (s *Store) InitializeProject(ctx context.Context, projectName string, now time.Time) error {
+	if err := s.SetMeta(ctx, "schema_version", SchemaVersion); err != nil {
+		return err
+	}
+	if err := s.SetMeta(ctx, "project_name", projectName); err != nil {
+		return err
+	}
+	return s.SetMetaIfMissing(ctx, "created_at", strconv.FormatInt(now.Unix(), 10))
+}
+
 func (s *Store) SetMeta(ctx context.Context, key, value string) error {
 	_, err := s.db.ExecContext(ctx, `INSERT INTO meta(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`, key, value)
+	return err
+}
+
+func (s *Store) SetMetaIfMissing(ctx context.Context, key, value string) error {
+	_, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO meta(key, value) VALUES(?, ?)`, key, value)
 	return err
 }
 
@@ -120,6 +162,33 @@ func (s *Store) EmbeddingDim(ctx context.Context) (int, bool, error) {
 	return dim, true, nil
 }
 
+func (s *Store) EnsureVectorTable(ctx context.Context, dim int) error {
+	var createSQL string
+	err := s.db.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE name = 'chunk_vectors'`).Scan(&createSQL)
+	if errors.Is(err, sql.ErrNoRows) {
+		_, err = s.db.ExecContext(ctx, vectorTableSQL(dim))
+		if err != nil {
+			return fmt.Errorf("failed to create sqlite-vec chunk_vectors table: %w", err)
+		}
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+
+	lowerSQL := strings.ToLower(createSQL)
+	if !strings.Contains(lowerSQL, "using vec0") {
+		return errors.New("Friday state uses a legacy embedding store. Run 'friday reset' and re-embed to rebuild with sqlite-vec")
+	}
+	if !strings.Contains(lowerSQL, fmt.Sprintf("float[%d]", dim)) {
+		return fmt.Errorf("sqlite-vec table dimension mismatch for chunk_vectors: expected float[%d]. Run 'friday reset' and re-embed", dim)
+	}
+	if !strings.Contains(lowerSQL, "distance_metric=cosine") {
+		return errors.New("sqlite-vec chunk_vectors table is missing cosine distance configuration. Run 'friday reset' and re-embed")
+	}
+	return nil
+}
+
 func (s *Store) GetFileByPath(ctx context.Context, path string) (FileRecord, bool, error) {
 	var file FileRecord
 	err := s.db.QueryRowContext(ctx, `SELECT id, path, mtime_unix, sha256, COALESCE(title, ''), last_indexed FROM files WHERE path = ?`, path).
@@ -133,7 +202,11 @@ func (s *Store) GetFileByPath(ctx context.Context, path string) (FileRecord, boo
 	return file, true, nil
 }
 
-func (s *Store) UpsertFileWithChunks(ctx context.Context, file FileRecord, chunks []ChunkRecord, vectors [][]float32) error {
+func (s *Store) UpsertFileWithChunks(ctx context.Context, file FileRecord, chunks []ChunkRecord, vectors [][]float32) (err error) {
+	if len(chunks) != len(vectors) {
+		return fmt.Errorf("chunk/vector count mismatch: %d chunks, %d vectors", len(chunks), len(vectors))
+	}
+
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -176,12 +249,12 @@ func (s *Store) UpsertFileWithChunks(ctx context.Context, file FileRecord, chunk
 			return err
 		}
 
-		vectorJSON, err := json.Marshal(vectors[idx])
+		vectorBlob, err := sqlite_vec.SerializeFloat32(vectors[idx])
 		if err != nil {
-			return err
+			return fmt.Errorf("failed serializing vector for chunk %d: %w", idx, err)
 		}
 
-		if _, err := tx.ExecContext(ctx, `INSERT INTO chunk_vectors(chunk_id, embedding_json) VALUES(?, ?)`, chunkID, string(vectorJSON)); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO chunk_vectors(chunk_id, embedding) VALUES(?, ?)`, chunkID, vectorBlob); err != nil {
 			return err
 		}
 	}
@@ -197,14 +270,26 @@ func (s *Store) DeleteMissingFiles(ctx context.Context, keepPaths map[string]str
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 
-	var removed []string
+	var allPaths []string
 	for rows.Next() {
 		var path string
 		if err := rows.Scan(&path); err != nil {
+			_ = rows.Close()
 			return nil, err
 		}
+		allPaths = append(allPaths, path)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+
+	var removed []string
+	for _, path := range allPaths {
 		if _, ok := keepPaths[path]; ok {
 			continue
 		}
@@ -213,7 +298,8 @@ func (s *Store) DeleteMissingFiles(ctx context.Context, keepPaths map[string]str
 		}
 		removed = append(removed, path)
 	}
-	return removed, rows.Err()
+
+	return removed, nil
 }
 
 func (s *Store) CountStats(ctx context.Context) (files int, chunks int, err error) {
@@ -239,12 +325,38 @@ func (s *Store) LastEmbedAt(ctx context.Context) (time.Time, bool, error) {
 }
 
 func (s *Store) Search(ctx context.Context, query []float32, limit int, threshold float64) ([]SearchResult, error) {
+	if limit <= 0 {
+		return nil, fmt.Errorf("search limit must be > 0, got %d", limit)
+	}
+
+	queryBlob, err := sqlite_vec.SerializeFloat32(query)
+	if err != nil {
+		return nil, fmt.Errorf("failed serializing query vector: %w", err)
+	}
+
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT c.id, c.chunk_index, COALESCE(c.heading_path, ''), c.content, f.path, COALESCE(f.title, ''), cv.embedding_json
-		FROM chunks c
+		WITH knn AS (
+			SELECT
+				chunk_id,
+				distance
+			FROM chunk_vectors
+			WHERE embedding MATCH ?
+				AND k = ?
+		)
+		SELECT
+			c.id,
+			c.chunk_index,
+			COALESCE(c.heading_path, ''),
+			c.content,
+			f.path,
+			COALESCE(f.title, ''),
+			knn.distance
+		FROM knn
+		JOIN chunks c ON c.id = knn.chunk_id
 		JOIN files f ON f.id = c.file_id
-		JOIN chunk_vectors cv ON cv.chunk_id = c.id
-	`)
+		WHERE (? <= 0 OR (1 - knn.distance) >= ?)
+		ORDER BY knn.distance ASC, c.id ASC
+	`, queryBlob, limit, threshold, threshold)
 	if err != nil {
 		return nil, err
 	}
@@ -253,37 +365,15 @@ func (s *Store) Search(ctx context.Context, query []float32, limit int, threshol
 	results := make([]SearchResult, 0, limit)
 	for rows.Next() {
 		var result SearchResult
-		var raw string
-		if err := rows.Scan(&result.ChunkID, &result.ChunkIndex, &result.HeadingPath, &result.Content, &result.Path, &result.Title, &raw); err != nil {
+		if err := rows.Scan(&result.ChunkID, &result.ChunkIndex, &result.HeadingPath, &result.Content, &result.Path, &result.Title, &result.Distance); err != nil {
 			return nil, err
 		}
-
-		var vector []float32
-		if err := json.Unmarshal([]byte(raw), &vector); err != nil {
-			return nil, err
-		}
-		result.EmbeddingLen = len(vector)
-		result.Distance = cosineDistance(query, vector)
 		result.Similarity = 1 - result.Distance
-		if threshold > 0 && result.Similarity < threshold {
-			continue
-		}
 		results = append(results, result)
 	}
 
 	if err := rows.Err(); err != nil {
 		return nil, err
-	}
-
-	sort.Slice(results, func(i, j int) bool {
-		if results[i].Distance == results[j].Distance {
-			return results[i].ChunkID < results[j].ChunkID
-		}
-		return results[i].Distance < results[j].Distance
-	})
-
-	if len(results) > limit {
-		results = results[:limit]
 	}
 
 	return results, nil
@@ -294,26 +384,4 @@ func emptyToNil(value string) any {
 		return nil
 	}
 	return value
-}
-
-func cosineDistance(a, b []float32) float64 {
-	if len(a) == 0 || len(a) != len(b) {
-		return 1
-	}
-
-	var dot, magA, magB float64
-	for i := range a {
-		af := float64(a[i])
-		bf := float64(b[i])
-		dot += af * bf
-		magA += af * af
-		magB += bf * bf
-	}
-
-	if magA == 0 || magB == 0 {
-		return 1
-	}
-
-	sim := dot / (math.Sqrt(magA) * math.Sqrt(magB))
-	return 1 - sim
 }
