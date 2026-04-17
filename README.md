@@ -39,6 +39,14 @@ friday ask "have I written about abstraction collapse before"
 echo "summarize my 2024 writing about swift" | friday ask
 ```
 
+## Commands
+
+- `friday init` bootstraps `.friday.toml`, confirms detected content paths, and creates the project state directory under `~/.friday/<name>/`.
+- `friday embed` indexes markdown files into SQLite, prints one line per file, and keeps the vector store in sync with file additions, edits, and deletions.
+- `friday run` opens the interactive REPL.
+- `friday ask` runs the same retrieval pipeline once for shell-friendly usage.
+- `friday reset` removes the derived Friday state for the current project.
+
 ## Config
 
 Friday reads `.friday.toml` from the current working directory:
@@ -73,3 +81,26 @@ host = "http://localhost:11434"
 - Friday stores derived state in `~/.friday/<project-name>/friday.db`.
 - Changing to an embedding model with a different output dimension requires `friday reset` before re-embedding.
 - `friday run` supports `:help`, `:stats`, `:sources <query>`, `:k <n>`, and `:q`.
+
+## Development
+
+Run the full local check suite with:
+
+```bash
+just check
+```
+
+The test strategy has two layers:
+
+- Most unit and integration tests use mocked Ollama HTTP servers so they run quickly and deterministically with no external dependencies.
+- A separate live smoke test can target a real Ollama instance:
+
+```bash
+FRIDAY_LIVE_OLLAMA=1 \
+FRIDAY_LIVE_OLLAMA_HOST=http://127.0.0.1:11434 \
+FRIDAY_LIVE_OLLAMA_CHAT_MODEL=smollm2:135m \
+FRIDAY_LIVE_OLLAMA_EMBED_MODEL=all-minilm \
+go test ./internal/ollama -run TestClientLiveOllama -v
+```
+
+Those model choices are intentionally small so the live CI job stays practical.

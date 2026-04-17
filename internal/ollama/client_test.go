@@ -2,34 +2,21 @@ package ollama
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
-	"net/http"
-	"net/http/httptest"
+	"strings"
 	"testing"
+
+	"github.com/charliewilco/friday/internal/testutil/ollamatest"
 )
 
 func TestClientEmbedModelExistsAndChat(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/api/tags":
-			_ = json.NewEncoder(w).Encode(map[string]any{
-				"models": []map[string]any{{"name": "chat-model"}, {"name": "embed-model"}},
-			})
-		case "/api/embed":
-			_ = json.NewEncoder(w).Encode(map[string]any{
-				"embeddings": [][]float32{{1, 0, 0}},
-			})
-		case "/api/chat":
-			fmt.Fprintln(w, `{"message":{"content":"hello"},"done":false}`)
-			fmt.Fprintln(w, `{"message":{"content":" world"},"done":true}`)
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	defer server.Close()
+	server := ollamatest.New(t, ollamatest.Options{
+		ChatModel:      "chat-model",
+		EmbeddingModel: "embed-model",
+		ChatResponse:   "hello world",
+		EmbeddingDim:   3,
+	})
 
-	client := New(server.URL)
+	client := New(server.URLString())
 	ctx := context.Background()
 
 	ok, err := client.ModelExists(ctx, "chat-model")
@@ -57,5 +44,36 @@ func TestClientEmbedModelExistsAndChat(t *testing.T) {
 	}
 	if output != "hello world" || streamed != "hello world" {
 		t.Fatalf("unexpected chat output %q / %q", output, streamed)
+	}
+}
+
+func TestClientEmbedRetriesTransientFailure(t *testing.T) {
+	server := ollamatest.New(t, ollamatest.Options{
+		EmbeddingModel:        "embed-model",
+		TransientEmbedFailure: 2,
+		EmbeddingDim:          4,
+	})
+
+	client := New(server.URLString())
+	vectors, err := client.Embed(context.Background(), "embed-model", []string{"retry me"})
+	if err != nil {
+		t.Fatalf("Embed() error = %v", err)
+	}
+	if len(vectors) != 1 || len(vectors[0]) != 4 {
+		t.Fatalf("unexpected vectors: %#v", vectors)
+	}
+	if server.EmbedRequests() != 3 {
+		t.Fatalf("expected 3 embed attempts, got %d", server.EmbedRequests())
+	}
+}
+
+func TestClientPingReportsHelpfulError(t *testing.T) {
+	client := New("http://127.0.0.1:9")
+	err := client.Ping(context.Background())
+	if err == nil {
+		t.Fatal("expected Ping() to fail")
+	}
+	if !strings.Contains(err.Error(), "ollama serve") {
+		t.Fatalf("expected helpful Ping() error, got %v", err)
 	}
 }

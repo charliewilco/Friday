@@ -3,9 +3,6 @@ package embed
 import (
 	"bytes"
 	"context"
-	"encoding/json"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,6 +11,7 @@ import (
 	"github.com/charliewilco/friday/internal/config"
 	"github.com/charliewilco/friday/internal/ollama"
 	"github.com/charliewilco/friday/internal/store"
+	"github.com/charliewilco/friday/internal/testutil/ollamatest"
 )
 
 func TestRunInitializesMetaIsIdempotentAndRemovesDeletedFiles(t *testing.T) {
@@ -43,9 +41,8 @@ func TestRunInitializesMetaIsIdempotentAndRemovesDeletedFiles(t *testing.T) {
 	}
 	defer db.Close()
 
-	server := newEmbedServer(3)
-	defer server.Close()
-	client := ollama.New(server.URL)
+	server := ollamatest.New(t, ollamatest.Options{EmbeddingDim: 3})
+	client := ollama.New(server.URLString())
 	ctx := context.Background()
 	var output bytes.Buffer
 
@@ -127,50 +124,14 @@ func TestRunRejectsEmbeddingDimensionMismatch(t *testing.T) {
 	defer db.Close()
 
 	ctx := context.Background()
-	server3 := newEmbedServer(3)
-	defer server3.Close()
-	if _, err := Run(ctx, cfg, db, ollama.New(server3.URL), Options{}); err != nil {
+	server3 := ollamatest.New(t, ollamatest.Options{EmbeddingDim: 3})
+	if _, err := Run(ctx, cfg, db, ollama.New(server3.URLString()), Options{}); err != nil {
 		t.Fatalf("initial Run() error = %v", err)
 	}
 
-	server4 := newEmbedServer(4)
-	defer server4.Close()
-	_, err = Run(ctx, cfg, db, ollama.New(server4.URL), Options{})
+	server4 := ollamatest.New(t, ollamatest.Options{EmbeddingDim: 4})
+	_, err = Run(ctx, cfg, db, ollama.New(server4.URLString()), Options{})
 	if err == nil || !strings.Contains(err.Error(), "embedding dimension mismatch") {
 		t.Fatalf("expected dimension mismatch error, got %v", err)
 	}
-}
-
-func newEmbedServer(dim int) *httptest.Server {
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/embed" {
-			http.NotFound(w, r)
-			return
-		}
-
-		var req struct {
-			Input []string `json:"input"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-
-		embeddings := make([][]float32, 0, len(req.Input))
-		for _, input := range req.Input {
-			vector := make([]float32, dim)
-			if len(vector) > 0 {
-				vector[0] = float32(len(input))
-			}
-			if len(vector) > 1 {
-				vector[1] = float32(strings.Count(strings.ToLower(input), "swift") + 1)
-			}
-			for i := 2; i < dim; i++ {
-				vector[i] = float32(i) / 10
-			}
-			embeddings = append(embeddings, vector)
-		}
-
-		_ = json.NewEncoder(w).Encode(map[string]any{"embeddings": embeddings})
-	}))
 }
