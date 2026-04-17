@@ -44,9 +44,10 @@ jobs:
 
       - name: Start Ollama
         run: |
+          export OLLAMA_HOST=127.0.0.1:11435
           nohup ollama serve > /tmp/ollama.log 2>&1 &
           for i in $(seq 1 30); do
-            if curl -fsS http://127.0.0.1:11434/api/tags >/dev/null; then
+            if curl -fsS http://127.0.0.1:11435/api/tags >/dev/null; then
               exit 0
             fi
             sleep 1
@@ -57,13 +58,14 @@ jobs:
 
       - name: Pull smoke test models
         run: |
+          export OLLAMA_HOST=127.0.0.1:11435
           ollama pull smollm2:135m
           ollama pull all-minilm
 
       - name: Run live Ollama smoke test
         env:
           FRIDAY_LIVE_OLLAMA: "1"
-          FRIDAY_LIVE_OLLAMA_HOST: http://127.0.0.1:11434
+          FRIDAY_LIVE_OLLAMA_HOST: http://127.0.0.1:11435
           FRIDAY_LIVE_OLLAMA_CHAT_MODEL: smollm2:135m
           FRIDAY_LIVE_OLLAMA_EMBED_MODEL: all-minilm
         run: go test ./internal/ollama -run TestClientLiveOllama -v
